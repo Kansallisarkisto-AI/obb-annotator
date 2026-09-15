@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLO-OBB Annotation Editor</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header id="topbar">
+    <div class="brand">YOLO&#8209;OBB&nbsp;Editor</div>
+
+    <button id="btnLoad" class="btn">Open Zip&hellip;</button>
+    <input type="file" id="fileInput" accept=".zip" hidden>
+    <button id="btnNewProject" class="btn">New Project</button>
+    <button id="btnSave" class="btn primary" disabled>Save Zip</button>
+
+    <div class="sep"></div>
+
+    <button id="toolSelect" class="btn tool active" title="Select tool (V)">&#9996; Select</button>
+    <button id="toolDraw" class="btn tool" title="Draw new box (B)">&#9633; New Box</button>
+
+    <div class="sep"></div>
+
+    <button id="btnUndo" class="btn icon" disabled title="Undo (Ctrl+Z)">&#8630; Undo</button>
+    <button id="btnRedo" class="btn icon" disabled title="Redo (Ctrl+Shift+Z)">&#8631; Redo</button>
+
+    <div class="sep"></div>
+
+    <button id="btnDuplicate" class="btn icon" disabled title="Duplicate selection (Ctrl+D)">&#10064; Dup</button>
+    <button id="btnDelete" class="btn icon danger" disabled title="Delete selection (Del)">&#10005; Delete</button>
+
+    <div class="sep"></div>
+
+    <button id="btnZoomOut" class="btn icon" title="Zoom out (-)">&minus;</button>
+    <span id="zoomLabel">&mdash;</span>
+    <button id="btnZoomIn" class="btn icon" title="Zoom in (+)">&plus;</button>
+    <button id="btnZoomFit" class="btn icon" title="Fit to window (F)">Fit</button>
+
+    <div class="grow"></div>
+    <span id="autosaveStatus" class="status" title="Automatic backup to this browser's local storage"></span>
+    <button id="btnClearAutosave" class="btn icon" title="Clear the autosaved browser backup">Clear Backup</button>
+    <span id="statusText" class="status"></span>
+  </header>
+
+  <div id="restoreBanner" hidden>
+    <span id="restoreBannerText"></span>
+    <button id="btnRestoreAutosave" class="btn primary small2">Restore</button>
+    <button id="btnDiscardAutosave" class="btn small2">Discard</button>
+  </div>
+
+  <div id="main">
+
+    <aside id="leftPanel">
+      <section class="panel-block">
+        <div class="project-name-row">
+          <label for="projectNameInput">Project</label>
+          <input id="projectNameInput" type="text" value="" placeholder="annotations" disabled>
+        </div>
+        <h3>Images <span id="imgCount" class="badge"></span>
+          <button id="btnAddImages" class="small" title="Add image files to this project">+ Add</button>
+          <input type="file" id="imageFilesInput" accept="image/*" multiple hidden>
+        </h3>
+        <div id="imageList" class="list"></div>
+      </section>
+      <section class="panel-block grow-block">
+        <h3>Classes <span id="classCount" class="badge"></span>
+          <button id="btnAddClass" class="small" title="Add new class">+ Add</button>
+        </h3>
+        <div id="classList" class="list"></div>
+      </section>
+    </aside>
+
+    <div id="viewportWrap">
+      <div id="viewport">
+        <div id="stage">
+          <img id="mainImage" draggable="false" alt="">
+        </div>
+        <canvas id="overlayCanvas"></canvas>
+      </div>
+      <div id="noImagesHint" hidden>
+        <div class="empty-card">
+          <h2>No images yet</h2>
+          <p>Click <strong>+ Add</strong> above the image list, or drag &amp; drop image files anywhere on this page.</p>
+        </div>
+      </div>
+      <div id="emptyState">
+        <div class="empty-card">
+          <h2>YOLO&#8209;OBB Annotation Editor</h2>
+          <p>Open a Label&nbsp;Studio&#8209;style YOLO&#8209;OBB export (.zip) to begin, or start a brand new project.</p>
+          <p class="hint">Expected zip layout: <code>classes.txt</code>, <code>notes.json</code>, <code>images/</code>, <code>labels/</code></p>
+          <button id="btnLoad2" class="btn primary big">Open Zip&hellip;</button>
+          <button id="btnNewProject2" class="btn big">New Project</button>
+          <p class="hint">or drag &amp; drop a .zip / image files anywhere on this page</p>
+        </div>
+      </div>
+      <div id="dropOverlay" hidden><div>Drop to load</div></div>
+    </div>
+
+    <aside id="rightPanel">
+      <section class="panel-block">
+        <h3>Selection <span id="selCount" class="badge">0</span></h3>
+        <div id="selDetails" class="list"></div>
+      </section>
+      <section class="panel-block grow-block">
+        <h3>Labels for selection</h3>
+        <div id="labelChecklist" class="list"></div>
+      </section>
+      <section class="panel-block">
+        <h3>Help</h3>
+        <div id="helpText" class="help"></div>
+      </section>
+    </aside>
+
+  </div>
+</div>
+
+<div id="toastHost"></div>
+
+<div id="loadingOverlay" hidden>
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <div id="loadingText">Loading&hellip;</div>
+    <div id="loadingSub" class="loading-sub"></div>
+  </div>
+</div>
+
+<script src="vendor/jszip.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
