@@ -76,6 +76,8 @@ var state = {
   history: [],
   future: [],
 
+  shadeOverlaps: true,  // darken areas where boxes overlap
+
   loaded: false,
   dirty: false
 };
@@ -765,6 +767,57 @@ var drag = null; // set during pointer interactions
 var rubberRect = null; // {x0,y0,x1,y1} screen coords, while rubber-band selecting
 var newBoxPreview = null; // {x0,y0,x1,y1} world-norm, while drawing
 
+/* ---- overlap detection --------------------------------------------------
+ * A box "overlaps" another when their areas intersect by more than ~0.5 image px.
+ * Cheap AABB sweep first; exact convex-quad SAT only when a rotated box is involved.
+ * Work is budgeted per frame so pathological layouts can't stall panning/zooming.   */
+var OVERLAP_EPS_PX = 0.5;
+var OVERLAP_FILL = "rgba(255,59,107,0.20)";   // stacked per box => overlaps render darker
+var OVERLAP_MAX_BOXES = 40000, OVERLAP_BUDGET = 4000000;
+
+function isAxisAligned(b) {
+  var p = b.pts, t = 1e-9;
+  return Math.abs(p[1] - p[3]) < t && Math.abs(p[2] - p[4]) < t && Math.abs(p[5] - p[7]) < t && Math.abs(p[6] - p[0]) < t;
+}
+function quadsOverlap(a, b, W, H) {
+  var polys = [a.pts, b.pts], k, e, i;
+  for (var pi = 0; pi < 2; pi++) {
+    var p = polys[pi];
+    for (e = 0; e < 4; e++) {
+      var x0 = p[e * 2] * W, y0 = p[e * 2 + 1] * H;
+      var x1 = p[((e + 1) % 4) * 2] * W, y1 = p[((e + 1) % 4) * 2 + 1] * H;
+      var ax = -(y1 - y0), ay = x1 - x0, len = Math.hypot(ax, ay);
+      if (len < 1e-9) continue;
+      ax /= len; ay /= len;
+      var minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity, d;
+      for (i = 0; i < 8; i += 2) {
+        d = a.pts[i] * W * ax + a.pts[i + 1] * H * ay; if (d < minA) minA = d; if (d > maxA) maxA = d;
+        d = b.pts[i] * W * ax + b.pts[i + 1] * H * ay; if (d < minB) minB = d; if (d > maxB) maxB = d;
+      }
+      if (Math.min(maxA, maxB) - Math.max(minA, minB) <= OVERLAP_EPS_PX) return false; // separating axis
+    }
+  }
+  return true;
+}
+function findOverlappingBoxes(list, im) {
+  var marked = new Set();
+  var epsX = OVERLAP_EPS_PX / im.width, epsY = OVERLAP_EPS_PX / im.height;
+  var arr = list.slice().sort(function (a, b) { return a.bbox[0] - b.bbox[0]; });
+  var budget = OVERLAP_BUDGET;
+  for (var i = 0; i < arr.length && budget > 0; i++) {
+    var a = arr[i], limit = a.bbox[2] - epsX, aAA = null;
+    for (var j = i + 1; j < arr.length && arr[j].bbox[0] < limit; j++) {
+      budget--;
+      var b = arr[j];
+      if (Math.min(a.bbox[3], b.bbox[3]) - Math.max(a.bbox[1], b.bbox[1]) <= epsY) continue;
+      if (aAA === null) aAA = isAxisAligned(a);
+      if (!(aAA && isAxisAligned(b)) && !quadsOverlap(a, b, im.width, im.height)) continue;
+      marked.add(a); marked.add(b);
+    }
+  }
+  return marked;
+}
+
 function drawOverlay() {
   sizeCanvasToViewport();
   var canvas = dom.overlayCanvas;
@@ -791,6 +844,7 @@ function drawOverlay() {
   // group by color (first visible label's color, or grey if all-hidden-but-shown-anyway)
   var byColor = new Map(); // colorHex -> array of box
   var visibleCount = 0, culledCount = 0, hiddenCount = 0;
+  var visList = [];
 
   for (var i = 0; i < boxes.length; i++) {
     var box = boxes[i];
@@ -803,12 +857,29 @@ function drawOverlay() {
     var bb = box.bbox;
     if (bb[2] < vx0 || bb[0] > vx1 || bb[3] < vy0 || bb[1] > vy1) { culledCount++; continue; }
     visibleCount++;
+    visList.push(box);
     var primaryCid = box.labels[0];
     var cls = classByCid(primaryCid);
     var color = cls ? classColorCache(primaryCid) : "#888";
     var arr = byColor.get(color);
     if (!arr) { arr = []; byColor.set(color, arr); }
     arr.push(box);
+  }
+
+  // overlap shading: each overlapping box is filled translucently, so where boxes stack the fills
+  // accumulate and the intersection shows up darker
+  var overlapCount = 0;
+  if (state.shadeOverlaps && visList.length > 1 && visList.length <= OVERLAP_MAX_BOXES) {
+    var overlapSet = findOverlappingBoxes(visList, im);
+    overlapCount = overlapSet.size;
+    if (overlapCount) {
+      ctx.fillStyle = OVERLAP_FILL;
+      overlapSet.forEach(function (b) {
+        ctx.beginPath();
+        addBoxPath(ctx, b, im, v);
+        ctx.fill();
+      });
+    }
   }
 
   // draw non-selected boxes, batched by color
@@ -889,7 +960,9 @@ function drawOverlay() {
   dom.statusText.textContent =
     boxes.length + " boxes on image \u00b7 " + visibleCount + " shown" +
     (hiddenCount ? " \u00b7 " + hiddenCount + " class-hidden" : "") +
-    (sel.size ? " \u00b7 " + sel.size + " selected" : "");
+    (overlapCount ? " \u00b7 " + overlapCount + " overlapping" : "") +
+    (sel.size ? " \u00b7 " + sel.size + " selected" : "") +
+    cycleStatusText();
 }
 
 var _colorCache = new Map();
@@ -914,6 +987,7 @@ function addBoxPath(ctx, box, im, v) {
 }
 
 var HANDLE_R = 5;
+var EDGE_HANDLE_MIN_LEN = 28; // px on screen; shorter edges get no edge handle (corners are close enough)
 function getHandlePositions(box, im, v) {
   var p = box.pts;
   var pts = [];
@@ -926,7 +1000,16 @@ function getHandlePositions(box, im, v) {
   var vx = midTopX - cx, vy = midTopY - cy;
   var len = Math.hypot(vx, vy) || 1;
   var rot = [midTopX + (vx / len) * 26, midTopY + (vy / len) * 26];
-  return { corners: pts, center: [cx, cy], rotate: rot };
+  var edges = [];
+  for (var e = 0; e < 4; e++) {
+    var pa = pts[e], pb = pts[(e + 1) % 4];
+    edges.push({
+      x: (pa[0] + pb[0]) / 2, y: (pa[1] + pb[1]) / 2,
+      angle: Math.atan2(pb[1] - pa[1], pb[0] - pa[0]),
+      len: Math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+    });
+  }
+  return { corners: pts, center: [cx, cy], rotate: rot, edges: edges };
 }
 
 function drawHandles(ctx, box, im, v) {
@@ -945,6 +1028,18 @@ function drawHandles(ctx, box, im, v) {
     ctx.beginPath();
     ctx.rect(c[0] - HANDLE_R, c[1] - HANDLE_R, HANDLE_R * 2, HANDLE_R * 2);
     ctx.fill(); ctx.stroke();
+  });
+  // edge handles: small bars lying along each edge (drag = move just that edge)
+  ctx.fillStyle = "#1b1d22";
+  h.edges.forEach(function (e) {
+    if (e.len < EDGE_HANDLE_MIN_LEN) return;
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(e.angle);
+    ctx.beginPath();
+    ctx.rect(-7, -3.5, 14, 7);
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
   });
   ctx.beginPath();
   ctx.arc(h.rotate[0], h.rotate[1], HANDLE_R, 0, Math.PI * 2);
@@ -975,16 +1070,21 @@ function findHandleAt(sx, sy, box, im, v) {
     if (Math.abs(sx - c[0]) <= rr && Math.abs(sy - c[1]) <= rr) return { type: "corner", index: i };
   }
   if (Math.hypot(sx - h.rotate[0], sy - h.rotate[1]) <= rr) return { type: "rotate" };
+  for (var e = 0; e < 4; e++) {
+    var eg = h.edges[e];
+    if (eg.len < EDGE_HANDLE_MIN_LEN) continue;
+    if (Math.hypot(sx - eg.x, sy - eg.y) <= rr) return { type: "edge", index: e };
+  }
   return null;
 }
 
-function findBoxAtScreen(sx, sy) {
+// All visible boxes containing the screen point, topmost (last in list) first.
+function findBoxesAtScreen(sx, sy) {
   var im = currentImage();
-  if (!im) return null;
+  if (!im) return [];
   var nx = (sx - state.view.panX) / state.view.zoom / im.width;
   var ny = (sy - state.view.panY) / state.view.zoom / im.height;
-  var boxes = im.boxes;
-  var best = null;
+  var boxes = im.boxes, out = [];
   for (var i = boxes.length - 1; i >= 0; i--) {
     var b = boxes[i];
     if (!b.labels.length) continue;
@@ -993,9 +1093,22 @@ function findBoxAtScreen(sx, sy) {
     if (!anyVisible) continue;
     var bb = b.bbox;
     if (nx < bb[0] || nx > bb[2] || ny < bb[1] || ny > bb[3]) continue;
-    if (pointInPolygonNorm(nx, ny, b.pts)) { best = b; break; }
+    if (pointInPolygonNorm(nx, ny, b.pts)) out.push(b);
   }
-  return best;
+  return out;
+}
+function findBoxAtScreen(sx, sy) {
+  var hits = findBoxesAtScreen(sx, sy);
+  return hits.length ? hits[0] : null;
+}
+
+// Click-cycling state: repeated clicks on the same spot step through the boxes stacked there.
+var lastClick = null; // {x, y, sig, pickedId, idx, n}
+var CLICK_SLOP_PX = 4, DRAG_START_PX = 3;
+function hitsSignature(hits) { return hits.map(function (b) { return b.id; }).join(","); }
+function cycleStatusText() {
+  if (!lastClick || state.selection.size !== 1 || !state.selection.has(lastClick.pickedId)) return "";
+  return " \u00b7 overlap " + (lastClick.idx + 1) + "/" + lastClick.n + " \u2014 click again to cycle";
 }
 
 function boxesInRectScreen(x0, y0, x1, y1) {
@@ -1070,6 +1183,16 @@ function onPointerDown(evt) {
   }
 
   // select tool
+  // Ctrl / Shift / Cmd held = selection-only mode: never move a box or grab a handle, even when
+  // the press lands on a box. A drag rubber-band-adds to the selection (so it can start in the
+  // middle of a box); a click without drag toggles the box under the cursor (decided on release).
+  if (evt.shiftKey || evt.ctrlKey || evt.metaKey) {
+    drag = { mode: "rubber", x0: sx, y0: sy, additive: true, clickHit: findBoxAtScreen(sx, sy) };
+    rubberRect = { x0: sx, y0: sy, x1: sx, y1: sy };
+    requestRedraw();
+    return;
+  }
+
   var single = getSelectedBoxSingle();
   var handle = single ? findHandleAt(sx, sy, single, im, state.view) : null;
   if (handle) {
@@ -1081,15 +1204,18 @@ function onPointerDown(evt) {
     return;
   }
 
-  var hit = findBoxAtScreen(sx, sy);
+  var hits = findBoxesAtScreen(sx, sy);
+  var hit = hits.length ? hits[0] : null;
+  // Pressing again on the same spot with the previously picked box still the sole selection keeps
+  // that box as the target (so a drag moves it), and a click (no drag) then advances the cycle.
+  var cycleActive = false;
+  if (hits.length > 1 && lastClick && state.selection.size === 1 &&
+      Math.hypot(sx - lastClick.x, sy - lastClick.y) <= CLICK_SLOP_PX &&
+      lastClick.sig === hitsSignature(hits) && state.selection.has(lastClick.pickedId)) {
+    var picked = hits.filter(function (b) { return b.id === lastClick.pickedId; })[0];
+    if (picked) { hit = picked; cycleActive = true; }
+  }
   if (hit) {
-    if (evt.shiftKey || evt.ctrlKey || evt.metaKey) {
-      if (state.selection.has(hit.id)) state.selection.delete(hit.id);
-      else state.selection.add(hit.id);
-      syncSelectionPanels(); requestRedraw();
-      drag = null;
-      return;
-    }
     if (!state.selection.has(hit.id)) {
       state.selection = new Set([hit.id]);
       syncSelectionPanels();
@@ -1097,7 +1223,10 @@ function onPointerDown(evt) {
     var ids = Array.from(state.selection);
     var startMap = {};
     im.boxes.forEach(function (b) { if (state.selection.has(b.id)) startMap[b.id] = b.pts.slice(); });
-    drag = { mode: "move", ids: ids, startMap: startMap, startWorld: screenToWorldNorm(sx, sy, im), moved: false };
+    drag = {
+      mode: "move", ids: ids, startMap: startMap, startWorld: screenToWorldNorm(sx, sy, im), moved: false,
+      armed: false, sx0: sx, sy0: sy, cycle: { hits: hits, active: cycleActive }
+    };
     requestRedraw();
     return;
   }
@@ -1135,6 +1264,10 @@ function onPointerMove(evt) {
   }
 
   if (drag.mode === "move") {
+    if (!drag.armed) { // ignore sub-threshold jitter so a slightly shaky click stays a click
+      if (Math.hypot(sx - drag.sx0, sy - drag.sy0) < DRAG_START_PX) return;
+      drag.armed = true;
+    }
     var nowN = screenToWorldNorm(sx, sy, im);
     var dxN = nowN[0] - drag.startWorld[0], dyN = nowN[1] - drag.startWorld[1];
     if (Math.abs(dxN) > 1e-9 || Math.abs(dyN) > 1e-9) drag.moved = true;
@@ -1183,6 +1316,20 @@ function applyHandleDrag(d, sx, sy, im) {
       box.pts[k] = rx / aspect + cx;
       box.pts[k + 1] = ry + cy;
     }
+    return;
+  }
+
+  if (d.handle.type === "edge") {
+    // move one edge along its own normal; both endpoints slide together so a rectangle stays
+    // a rectangle (works for rotated boxes too). Maths in aspect-corrected pixel space.
+    var spE = d.startPts, iE = d.handle.index, jE = (iE + 1) % 4;
+    var aspE = im.width / im.height;
+    var Ax = spE[iE * 2] * aspE, Ay = spE[iE * 2 + 1], Bx = spE[jE * 2] * aspE, By = spE[jE * 2 + 1];
+    var edx = Bx - Ax, edy = By - Ay, elen = Math.hypot(edx, edy) || 1e-9;
+    var nxE = -edy / elen, nyE = edx / elen;
+    var shift = (n[0] * aspE - (Ax + Bx) / 2) * nxE + (n[1] - (Ay + By) / 2) * nyE;
+    box.pts[iE * 2] = (Ax + nxE * shift) / aspE; box.pts[iE * 2 + 1] = Ay + nyE * shift;
+    box.pts[jE * 2] = (Bx + nxE * shift) / aspE; box.pts[jE * 2 + 1] = By + nyE * shift;
     return;
   }
 
@@ -1260,6 +1407,7 @@ function onPointerUp(evt) {
 
   if (d.mode === "move") {
     if (d.moved) {
+      lastClick = null;
       var endMap = {};
       im.boxes.forEach(function (b) { if (d.startMap[b.id]) endMap[b.id] = b.pts.slice(); });
       var startMap = d.startMap;
@@ -1268,6 +1416,24 @@ function onPointerUp(evt) {
         redo: function () { applyPtsMap(im, endMap); }
       });
       afterDataChange();
+    } else if (d.cycle) {
+      // a click (no drag): remember the spot, and if it repeats a previous click advance to the next stacked box
+      var hs = d.cycle.hits;
+      if (hs.length > 1 && state.selection.size === 1) {
+        var curId = Array.from(state.selection)[0];
+        var cidx = -1;
+        for (var q = 0; q < hs.length; q++) if (hs[q].id === curId) { cidx = q; break; }
+        if (cidx >= 0) {
+          if (d.cycle.active) {
+            cidx = (cidx + 1) % hs.length;
+            curId = hs[cidx].id;
+            state.selection = new Set([curId]);
+            syncSelectionPanels();
+          }
+          lastClick = { x: d.sx0, y: d.sy0, sig: hitsSignature(hs), pickedId: curId, idx: cidx, n: hs.length };
+        } else lastClick = null;
+      } else lastClick = null;
+      requestRedraw();
     }
     return;
   }
@@ -1293,8 +1459,10 @@ function onPointerUp(evt) {
     var movedEnough = Math.hypot(rubberRect.x1 - d.x0, rubberRect.y1 - d.y0) > 3;
     if (movedEnough) {
       picked.forEach(function (b) { state.selection.add(b.id); });
-    } else if (!d.additive) {
-      // treat as empty click -> ensure selection cleared (already done on down)
+    } else if (d.clickHit) {
+      // modifier-click without dragging: toggle the box under the cursor
+      if (state.selection.has(d.clickHit.id)) state.selection.delete(d.clickHit.id);
+      else state.selection.add(d.clickHit.id);
     }
     rubberRect = null;
     syncSelectionPanels();
@@ -1421,7 +1589,7 @@ function selectAll() {
 
 function onKeyDown(evt) {
   var tag = (document.activeElement && document.activeElement.tagName) || "";
-  var typing = tag === "INPUT" || tag === "TEXTAREA" || document.activeElement.isContentEditable;
+  var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.activeElement.isContentEditable;
 
   if (evt.code === "Space" && !typing) {
     spaceHeld = true;
@@ -1451,6 +1619,7 @@ function onKeyDown(evt) {
   if (evt.key === "v" || evt.key === "V") { setTool("select"); return; }
   if (evt.key === "b" || evt.key === "B") { setTool("draw"); return; }
   if (evt.key === "f" || evt.key === "F") { fitToWindow(); return; }
+  if (evt.key === "o" || evt.key === "O") { setOverlapShading(!state.shadeOverlaps); return; }
   if (evt.key === "+" || evt.key === "=") { zoomBy(1.2); return; }
   if (evt.key === "-" || evt.key === "_") { zoomBy(1 / 1.2); return; }
 
@@ -1473,6 +1642,12 @@ function zoomBy(factor) {
   state.view.panX = cx - worldX * state.view.zoom;
   state.view.panY = cy - worldY * state.view.zoom;
   applyStageTransform();
+  requestRedraw();
+}
+
+function setOverlapShading(on) {
+  state.shadeOverlaps = !!on;
+  if (dom.btnOverlap) dom.btnOverlap.classList.toggle("active", state.shadeOverlaps);
   requestRedraw();
 }
 
@@ -1614,6 +1789,7 @@ function renderClassList() {
 
     host.appendChild(row);
   });
+  refreshTcClassSelect();
 }
 
 function hslToHex(hsl) {
@@ -1745,6 +1921,7 @@ function renderImageList() {
     host.appendChild(row);
   });
   updateNoImagesHint();
+  syncTcButtons();
 }
 
 function updateNoImagesHint() {
@@ -1755,6 +1932,7 @@ function switchToImage(i) {
   if (i < 0 || i >= state.images.length || i === state.currentImageIndex) return;
   state.currentImageIndex = i;
   state.selection = new Set();
+  lastClick = null;
   var im = state.images[i];
   dom.mainImage.src = im.url;
   dom.mainImage.style.width = im.width + "px";
@@ -1995,6 +2173,307 @@ function renderLabelChecklist() {
 }
 
 /* ----------------------------------------------------------------- *
+ *  TABLE CELL DETECTION (onnxruntime-web, see table-cells.js)
+ *
+ *  Detected cells are added as ordinary axis-aligned boxes (same
+ *  geometry the "New Box" tool produces), assigned to one class, and
+ *  recorded as a single undoable history entry for the whole run.
+ * ----------------------------------------------------------------- */
+var TC_NEW = "__new__";
+var tcBusy = false, tcCancelled = false;
+var tcModelInfo = { wired: null, wireless: null, layout: null };
+var tcUrls = {};
+
+function fmtMB(n) { return n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB"; }
+
+function beginBusy(text, sub) {
+  tcBusy = true; tcCancelled = false;
+  showLoading(text, sub);
+  if (dom.btnCancelBusy) dom.btnCancelBusy.hidden = false;
+  syncTcButtons();
+}
+function endBusy() {
+  tcBusy = false;
+  if (dom.btnCancelBusy) dom.btnCancelBusy.hidden = true;
+  hideLoading();
+  syncTcButtons();
+}
+
+function syncTcButtons() {
+  if (!dom.btnDetectCells) return;
+  var ok = !!window.TableCells && state.loaded && state.images.length > 0 && !tcBusy;
+  dom.btnDetectCells.disabled = !ok;
+  dom.btnDetectAll.disabled = !ok;
+}
+
+function refreshTcClassSelect() {
+  var sel = dom.tcClass;
+  if (!sel) return;
+  var prev = sel.value;
+  sel.innerHTML = "";
+  var preferred = null;
+  state.classes.forEach(function (c) {
+    var o = el("option", null, c.name);
+    o.value = String(c.cid);
+    sel.appendChild(o);
+    if (preferred === null && /cell|blank/i.test(c.name)) preferred = String(c.cid);
+  });
+  var nw = el("option", null, "+ new class \u201ctable_cell\u201d");
+  nw.value = TC_NEW;
+  sel.appendChild(nw);
+  var has = function (v) { return Array.prototype.some.call(sel.options, function (o) { return o.value === v; }); };
+  // keep an explicit choice of a real class; otherwise snap to a matching existing class (so a
+  // "+ new class" selection can never create a duplicate once table_cell exists, e.g. after redo)
+  var keepPrev = prev && prev !== TC_NEW && has(prev);
+  sel.value = keepPrev ? prev : (preferred !== null ? preferred : TC_NEW);
+}
+
+function tcUrlFor(kind) {
+  return tcUrls[kind] || window.TableCells.DEFAULT_MODELS[kind].url;
+}
+
+function updateTcBadge() {
+  if (!dom.tcBadge) return;
+  var kind = dom.tcType.value;
+  var have = !!tcModelInfo[kind];
+  dom.tcBadge.textContent = have ? "model ready" : "no model";
+  dom.tcBadge.style.color = have ? "var(--good)" : "";
+  dom.tcBadge.title = have ? ("Stored in this browser: " + tcModelInfo[kind].name) : "Will be downloaded on first use (or load a .onnx file under Model files)";
+}
+
+async function refreshTcModels() {
+  if (!window.TableCells) return;
+  tcModelInfo = await window.TableCells.listModels();
+  renderTcModels();
+  updateTcBadge();
+}
+
+function renderTcModels() {
+  var host = dom.tcModels;
+  if (!host) return;
+  host.innerHTML = "";
+  ["wired", "wireless", "layout"].forEach(function (kind) {
+    var def = window.TableCells.DEFAULT_MODELS[kind];
+    var info = tcModelInfo[kind];
+    var box = el("div", "tc-model");
+
+    var head = el("div", "tc-mhead");
+    head.appendChild(el("span", "tc-mname", def.label));
+    var st = el("span", "tc-mstate" + (info ? " ok" : ""), info ? "\u2713 " + fmtMB(info.size) : "not loaded");
+    if (info) st.title = info.name;
+    head.appendChild(st);
+    box.appendChild(head);
+
+    var url = el("input"); url.type = "text"; url.value = tcUrlFor(kind); url.spellcheck = false;
+    url.title = "Download URL for the .onnx file";
+    url.addEventListener("input", function () { tcUrls[kind] = url.value.trim(); });
+    box.appendChild(url);
+
+    var btns = el("div", "tc-mbtns");
+    var dl = el("button", "btn small2", info ? "Re-download" : "Download");
+    dl.addEventListener("click", function () { tcDownloadModel(kind); });
+    var file = el("input"); file.type = "file"; file.accept = ".onnx"; file.hidden = true;
+    file.addEventListener("change", function () {
+      if (file.files && file.files[0]) tcLoadModelFile(kind, file.files[0]);
+      file.value = "";
+    });
+    var ld = el("button", "btn small2", "Load file\u2026");
+    ld.addEventListener("click", function () { file.click(); });
+    btns.appendChild(dl); btns.appendChild(ld); btns.appendChild(file);
+    if (info) {
+      var rm = el("button", "btn small2 danger", "Remove");
+      rm.addEventListener("click", async function () { await window.TableCells.removeModel(kind); await refreshTcModels(); });
+      btns.appendChild(rm);
+    }
+    box.appendChild(btns);
+    host.appendChild(box);
+  });
+}
+
+async function tcDownloadModel(kind) {
+  if (tcBusy) return;
+  var def = window.TableCells.DEFAULT_MODELS[kind];
+  beginBusy("Downloading model\u2026", def.label);
+  try {
+    await window.TableCells.downloadModel(kind, tcUrlFor(kind), function (got, total) {
+      updateLoading(undefined, def.label + " \u2014 " + fmtMB(got) + (total ? " / " + fmtMB(total) : ""));
+    }, function () { return tcCancelled; });
+    toast("Model stored in this browser: " + def.label, "ok");
+  } catch (err) {
+    if (/Cancelled/.test(err.message)) toast("Download cancelled.");
+    else { console.error(err); toast(err.message, "err"); }
+  } finally {
+    endBusy();
+    await refreshTcModels();
+  }
+}
+
+async function tcLoadModelFile(kind, file) {
+  if (tcBusy) return;
+  beginBusy("Reading model\u2026", file.name);
+  try {
+    await window.TableCells.storeModelFile(kind, file);
+    toast("Loaded " + file.name, "ok");
+  } catch (err) {
+    console.error(err); toast("Could not store model: " + err.message, "err");
+  } finally {
+    endBusy();
+    await refreshTcModels();
+  }
+}
+
+// Adds detected cells to one image. Returns an undo record.
+function applyCellDetection(im, cells, imgW, imgH, cid, replace) {
+  var rec = { im: im, added: [], removed: [] };
+  if (replace) {
+    var keep = [];
+    im.boxes.forEach(function (b, idx) {
+      if (b.labels.length === 1 && b.labels[0] === cid) rec.removed.push({ box: b, idx: idx });
+      else keep.push(b);
+    });
+    im.boxes = keep;
+  }
+  cells.forEach(function (c) {
+    var x1 = c.bbox[0] / imgW, y1 = c.bbox[1] / imgH, x2 = c.bbox[2] / imgW, y2 = c.bbox[3] / imgH;
+    var box = { id: im.nextBoxId++, pts: new Float64Array([x1, y1, x2, y1, x2, y2, x1, y2]), labels: [cid] };
+    recomputeBBox(box);
+    im.boxes.push(box);
+    rec.added.push(box);
+  });
+  return rec;
+}
+
+async function runCellDetection(all) {
+  if (tcBusy) return;
+  if (!window.TableCells) { toast("Table-cell module failed to load.", "err"); return; }
+  if (!state.loaded || !state.images.length) { toast("Add an image first.", "err"); return; }
+
+  var kind = dom.tcType.value;
+  var useLayout = dom.tcUseLayout.checked;
+  var cellThr = parseFloat(dom.tcCellThr.value); if (!isFinite(cellThr)) cellThr = 0.3;
+  var layoutThr = parseFloat(dom.tcLayoutThr.value); if (!isFinite(layoutThr)) layoutThr = 0.3;
+  cellThr = clamp(cellThr, 0, 1); layoutThr = clamp(layoutThr, 0, 1);
+  var replace = dom.tcReplace.checked;
+  var targets = all ? state.images.slice() : [currentImage()];
+
+  var records = [], createdClass = null, cid = null, totalCells = 0, doneImages = 0;
+  var cancelledRun = false, failure = null;
+
+  beginBusy("Detecting table cells\u2026", "");
+  try {
+    // make sure the needed models are stored (download on first use)
+    await refreshTcModels();
+    var needed = [kind].concat(useLayout ? ["layout"] : []);
+    for (var n = 0; n < needed.length; n++) {
+      var k = needed[n];
+      if (tcModelInfo[k]) continue;
+      var def = window.TableCells.DEFAULT_MODELS[k];
+      updateLoading("Downloading model\u2026", def.label);
+      await window.TableCells.downloadModel(k, tcUrlFor(k), function (got, total) {
+        updateLoading(undefined, def.label + " \u2014 " + fmtMB(got) + (total ? " / " + fmtMB(total) : ""));
+      }, function () { return tcCancelled; });
+      await refreshTcModels();
+    }
+    updateLoading("Detecting table cells\u2026", "");
+
+    for (var i = 0; i < targets.length; i++) {
+      if (tcCancelled) throw new Error("Cancelled");
+      var im = targets[i];
+      var where = targets.length > 1 ? "image " + (i + 1) + " / " + targets.length + " (" + im.name + ")  \u00b7  " : "";
+      updateLoading("Detecting table cells\u2026", where);
+      var src = await window.TableCells.imageSourceFromUrl(im.url);
+      var cells = await window.TableCells.detectTableCells(src, {
+        wired: kind === "wired",
+        cellThreshold: cellThr,
+        layoutThreshold: layoutThr,
+        useLayout: useLayout,
+        onProgress: function (t) { updateLoading(undefined, where + t); },
+        isCancelled: function () { return tcCancelled; }
+      });
+      if (!cells.length && !replace) { doneImages++; continue; }
+
+      if (cid === null) { // resolve / create the target class lazily, on the first real result
+        if (dom.tcClass.value === TC_NEW) {
+          createdClass = { cid: uid(), name: "table_cell" };
+          state.classes.push(createdClass);
+          state.classVisible[createdClass.cid] = true;
+          invalidateColorCache();
+          renderClassList();
+          dom.tcClass.value = String(createdClass.cid);
+          cid = createdClass.cid;
+        } else {
+          cid = parseInt(dom.tcClass.value, 10);
+        }
+      }
+      records.push(applyCellDetection(im, cells, src.width, src.height, cid, replace));
+      totalCells += cells.length;
+      doneImages++;
+      await new Promise(function (r) { setTimeout(r, 0); });
+    }
+  } catch (err) {
+    if (/Cancelled/.test(err.message)) cancelledRun = true;
+    else { failure = err; console.error(err); }
+  } finally {
+    endBusy();
+  }
+
+  if (records.length) {
+    pushHistory({
+      undo: function () {
+        records.forEach(function (r) {
+          var addedSet = new Set(r.added);
+          r.im.boxes = r.im.boxes.filter(function (b) { return !addedSet.has(b); });
+          r.removed.slice().sort(function (a, b) { return a.idx - b.idx; }).forEach(function (x) {
+            r.im.boxes.splice(Math.min(x.idx, r.im.boxes.length), 0, x.box);
+          });
+        });
+        if (createdClass) {
+          state.classes = state.classes.filter(function (c) { return c !== createdClass; });
+          delete state.classVisible[createdClass.cid];
+          invalidateColorCache();
+        }
+        state.selection = new Set();
+      },
+      redo: function () {
+        if (createdClass) {
+          if (state.classes.indexOf(createdClass) === -1) state.classes.push(createdClass);
+          state.classVisible[createdClass.cid] = true;
+          invalidateColorCache();
+        }
+        records.forEach(function (r) {
+          var removedSet = new Set(r.removed.map(function (x) { return x.box; }));
+          r.im.boxes = r.im.boxes.filter(function (b) { return !removedSet.has(b); });
+          r.added.forEach(function (b) { r.im.boxes.push(b); });
+        });
+        state.selection = new Set();
+      }
+    });
+    afterDataChange();
+    refreshTcClassSelect();
+  }
+
+  if (failure) toast("Detection failed: " + failure.message, "err");
+  else if (cancelledRun) toast(records.length ? "Cancelled \u2014 kept results for " + records.length + " image(s) (Ctrl+Z to undo)." : "Cancelled.");
+  else if (totalCells === 0) toast("No cells found. Try a lower threshold, or switch wired/wireless.", "err");
+  else toast("Added " + totalCells + " cell box(es) on " + records.length + " image(s). Ctrl+Z undoes the whole run.", "ok");
+}
+
+function initTableCellUI() {
+  if (!window.TableCells) {
+    if (dom.tcBlock) dom.tcBlock.hidden = true;
+    return;
+  }
+  dom.tcType.addEventListener("change", updateTcBadge);
+  dom.tcUseLayout.addEventListener("change", function () { dom.tcLayoutThrRow.hidden = !dom.tcUseLayout.checked; });
+  dom.btnDetectCells.addEventListener("click", function () { runCellDetection(false); });
+  dom.btnDetectAll.addEventListener("click", function () { runCellDetection(true); });
+  dom.btnCancelBusy.addEventListener("click", function () { tcCancelled = true; dom.btnCancelBusy.hidden = true; updateLoading(undefined, "Cancelling\u2026"); });
+  refreshTcClassSelect();
+  syncTcButtons();
+  refreshTcModels();
+}
+
+/* ----------------------------------------------------------------- *
  *  PROJECT LOAD HOOK / TOP LEVEL WIRING
  * ----------------------------------------------------------------- */
 function onProjectLoaded() {
@@ -2049,6 +2528,7 @@ function wireEvents() {
   dom.btnZoomIn.addEventListener("click", function () { zoomBy(1.25); });
   dom.btnZoomOut.addEventListener("click", function () { zoomBy(1 / 1.25); });
   dom.btnZoomFit.addEventListener("click", fitToWindow);
+  dom.btnOverlap.addEventListener("click", function () { setOverlapShading(!state.shadeOverlaps); });
 
   dom.btnAddClass.addEventListener("click", addClass);
 
@@ -2094,10 +2574,11 @@ function wireEvents() {
 function initHelp() {
   dom.helpText.innerHTML =
     "<kbd>V</kbd> select &nbsp; <kbd>B</kbd> new box<br>" +
-    "<kbd>Shift</kbd>/<kbd>Ctrl</kbd>+click multi-select<br>" +
+    "<kbd>Shift</kbd>/<kbd>Ctrl</kbd>+click/drag adds to selection (never moves)<br>" +
     "Drag empty area to rubber-band select<br>" +
     "Drag box body to move &middot; corners to resize<br>" +
-    "Green handle rotates &middot; <kbd>Alt</kbd>+corner = free vertex<br>" +
+    "Edge bars move one edge &middot; green handle rotates &middot; <kbd>Alt</kbd>+corner = free vertex<br>" +
+    "Click the same spot again to cycle through stacked boxes &middot; <kbd>O</kbd> overlap shading<br>" +
     "<kbd>Del</kbd> delete &middot; <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate<br>" +
     "<kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> undo/redo<br>" +
     "Arrow keys nudge &middot; <kbd>Shift</kbd>+arrow = 10px<br>" +
@@ -2118,14 +2599,19 @@ document.addEventListener("DOMContentLoaded", function () {
     btnUndo: $("#btnUndo"), btnRedo: $("#btnRedo"),
     btnDuplicate: $("#btnDuplicate"), btnDelete: $("#btnDelete"),
     btnZoomIn: $("#btnZoomIn"), btnZoomOut: $("#btnZoomOut"), btnZoomFit: $("#btnZoomFit"),
-    zoomLabel: $("#zoomLabel"), statusText: $("#statusText"),
+    zoomLabel: $("#zoomLabel"), statusText: $("#statusText"), btnOverlap: $("#btnOverlap"),
     imageList: $("#imageList"), imgCount: $("#imgCount"),
     classList: $("#classList"), classCount: $("#classCount"), btnAddClass: $("#btnAddClass"),
     viewport: $("#viewport"), stage: $("#stage"), mainImage: $("#mainImage"), overlayCanvas: $("#overlayCanvas"),
     selCount: $("#selCount"), selDetails: $("#selDetails"), labelChecklist: $("#labelChecklist"),
-    helpText: $("#helpText")
+    helpText: $("#helpText"),
+    tcBlock: $("#tcBlock"), tcType: $("#tcType"), tcCellThr: $("#tcCellThr"), tcClass: $("#tcClass"),
+    tcUseLayout: $("#tcUseLayout"), tcLayoutThr: $("#tcLayoutThr"), tcLayoutThrRow: $("#tcLayoutThrRow"),
+    tcReplace: $("#tcReplace"), btnDetectCells: $("#btnDetectCells"), btnDetectAll: $("#btnDetectAll"),
+    tcModels: $("#tcModels"), tcBadge: $("#tcBadge"), btnCancelBusy: $("#btnCancelBusy")
   };
   wireEvents();
+  initTableCellUI();
   initHelp();
   sizeCanvasToViewport();
   applyStageTransform();

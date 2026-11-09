@@ -66,11 +66,29 @@ internal id exactly once on load and back again on save.
   how many boxes currently use that class. Deleting an in-use class
   asks for confirmation and removes just that label from affected
   boxes (a box left with zero labels is removed).
-- **Selection** — click a box to select it; `Shift`/`Ctrl`/`Cmd`-click
-  to add/toggle; drag on empty canvas for a rubber-band multi-select;
-  `Ctrl+A` selects all visible boxes on the current image.
+- **Selection** — click a box to select it; drag on empty canvas for a
+  rubber-band multi-select; `Ctrl+A` selects all visible boxes on the
+  current image. Holding `Shift`/`Ctrl`/`Cmd` switches to selection-only
+  mode: a click toggles the box under the cursor, and a drag
+  rubber-band-**adds** to the current selection — even when the drag
+  starts in the middle of a box. Nothing is moved or resized while a
+  modifier is held.
+- **Overlap highlighting** — boxes that overlap another box are filled
+  translucently, so the intersection renders darker (a triple overlap
+  darker still); non-overlapping boxes stay outline-only. The status
+  bar reports how many visible boxes overlap. Toggle with the
+  **◐ Overlaps** toolbar button or `O`. Works for rotated boxes too
+  (exact convex-quad test).
+- **Click-cycling through stacked boxes** — click the same spot again
+  (within a few pixels) to step through every box under it, topmost
+  first, wrapping around; the status bar shows the position ("overlap
+  2/3"). Clicking elsewhere resets the cycle, and pressing and dragging
+  still moves the currently selected box. Tiny hand jitter (&lt;3px)
+  during a click no longer counts as a drag.
 - **Editing** — drag a box body to move it (works for multi-selection
-  too — all selected boxes move together); drag a corner handle to
+  too — all selected boxes move together); drag a bar on the middle of an edge
+  to move just that edge (along its own normal, so rotated boxes stay
+  rectangular; edges shorter than 28px on screen get no bar); drag a corner handle to
   resize (keeps the box rectangular — the opposite corner stays fixed
   and the two adjacent corners are re-projected, so it behaves like a
   real oriented bounding box, not a free quad); hold **Alt** while
@@ -104,6 +122,19 @@ internal id exactly once on load and back again on save.
   Note: browser storage under `file://` can behave a little
   differently from a normal `https://` site depending on the browser,
   so treat it as a convenience, not a substitute for saving a zip.
+- **Table cell detection (ONNX, in-browser)** — the right-hand
+  *Table cell detection* panel runs the PaddlePaddle RT-DETR-L wired /
+  wireless table-cell detectors locally with onnxruntime-web (WASM) and
+  adds each detected cell as an ordinary box. Pick *wired* or *wireless*,
+  set the cell threshold and the class to assign (or let it create a
+  `table_cell` class), then **Detect (this image)** or **All images**.
+  Optionally tick *Find tables first* to run the PP-DocLayout_plus-L
+  layout model and detect cells only inside table / image regions.
+  Large images are processed in overlapping 1920px tiles and merged
+  (SAHI-style), cells are emitted in reading order, and a whole run is a
+  single **undo** step. *Replace this class's boxes* makes re-running
+  with a different threshold idempotent. See "Table cell detection
+  models" below for how models are obtained.
 - **Performance at scale** — designed for images with thousands of
   boxes: the base image is a plain `<img>` panned/zoomed via a GPU
   CSS transform (so pan/zoom cost is independent of box count), while
@@ -111,13 +142,54 @@ internal id exactly once on load and back again on save.
   into one `stroke()` call per class color and culled to the visible
   viewport, so redraws stay sub-millisecond even at 10,000+ boxes.
 
+## Table cell detection models
+
+The `.onnx` files are large (~100+ MB each) and are **not** bundled. The
+first time you run detection, the app downloads the model for the selected
+mode in your browser (Hugging Face serves CORS headers, so this works from
+`file://`) and stores it in browser storage (IndexedDB, separate from the
+project autosave) so it is only fetched once. Alternatively, download the
+`.onnx` yourself and use **Model files → Load file…** for fully offline use.
+
+Default sources (editable in the *Model files* section):
+
+| Model | URL |
+|---|---|
+| Wired cells | `huggingface.co/PaddlePaddle/RT-DETR-L_wired_table_cell_det_onnx` (`inference.onnx`) |
+| Wireless cells | `huggingface.co/PaddlePaddle/RT-DETR-L_wireless_table_cell_det_onnx` (`inference.onnx`) |
+| Layout (optional) | `huggingface.co/PaddlePaddle/PP-DocLayout_plus-L_onnx` (`inference.onnx`) |
+
+If a repo uses a different file name, paste the correct `resolve/main/...`
+URL into the field. Models are expected to follow the Paddle detection
+export convention: inputs `im_shape`, `image`, `scale_factor` (matched by
+name, any order) and an `[N, 6]` output of `class, score, x1, y1, x2, y2`.
+
+Notes:
+
+- Inference runs entirely on-device (WASM, single-threaded, since
+  multi-threading needs cross-origin isolation which `file://` pages
+  don't have). Expect seconds per 1920px tile on a laptop CPU; the
+  *Cancel* button on the progress dialog stops between tiles and keeps
+  what was already detected.
+- The ONNX Runtime WASM binary (~11 MB) is embedded in
+  `vendor/ort/ort-wasm-embedded.js` (14 MB, base64) and only loaded the
+  first time detection is used — it has no effect on startup time. This
+  is what makes it work from `file://`, where ES modules and `fetch()` of
+  local files are blocked. Regenerate it with `tools/build-ort-embed.js`
+  (instructions in the file header).
+- Preprocessing resizes tiles to the model input size with the browser's
+  canvas scaler (the Python pipeline uses OpenCV bicubic), so scores can
+  differ marginally from the Label Studio backend.
+
 ## Keyboard reference
 
 | Key | Action |
 |---|---|
 | `V` / `B` | Select tool / New-box tool |
-| Click / Shift+Click / Ctrl+Click | Select / add / toggle |
+| Click | Select |
+| Shift/Ctrl+Click | Toggle box in selection |
 | Drag empty space | Rubber-band select |
+| Shift/Ctrl+Drag (anywhere) | Rubber-band add to selection, never moves boxes |
 | `Ctrl+A` | Select all (visible) on current image |
 | `Del` | Delete selection |
 | `Ctrl+D` | Duplicate selection |
@@ -126,6 +198,8 @@ internal id exactly once on load and back again on save.
 | Scroll | Zoom (around cursor) |
 | Space+drag, middle/right-drag | Pan |
 | `F` | Fit image to window |
+| `O` | Toggle overlap shading |
+| Click same spot repeatedly | Cycle through stacked boxes |
 | `Ctrl+S` | Save zip |
 
 ## Troubleshooting
@@ -139,8 +213,11 @@ of failing silently.
 ## Files
 
 ```
-index.html         page shell
-style.css           styling
-app.js              all application logic
-vendor/jszip.min.js bundled ZIP library (MIT licensed, JSZip project)
+index.html            page shell
+style.css             styling
+app.js                application logic
+table-cells.js        table-cell detection (onnxruntime-web pipeline, reading order, tiling/merge)
+vendor/jszip.min.js   bundled ZIP library (MIT licensed, JSZip project)
+vendor/ort/           onnxruntime-web (MIT): ort.wasm.min.js + embedded WASM runtime
+tools/build-ort-embed.js   regenerates vendor/ort/ort-wasm-embedded.js
 ```

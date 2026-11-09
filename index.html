@@ -39,6 +39,10 @@
     <button id="btnZoomIn" class="btn icon" title="Zoom in (+)">&plus;</button>
     <button id="btnZoomFit" class="btn icon" title="Fit to window (F)">Fit</button>
 
+    <div class="sep"></div>
+
+    <button id="btnOverlap" class="btn tool active" title="Shade overlapping boxes darker (O)">&#9680; Overlaps</button>
+
     <div class="grow"></div>
     <span id="autosaveStatus" class="status" title="Automatic backup to this browser's local storage"></span>
     <button id="btnClearAutosave" class="btn icon" title="Clear the autosaved browser backup">Clear Backup</button>
@@ -108,6 +112,37 @@
         <h3>Labels for selection</h3>
         <div id="labelChecklist" class="list"></div>
       </section>
+      <section class="panel-block" id="tcBlock">
+        <h3>Table cell detection <span id="tcBadge" class="badge" title="Model status">no model</span></h3>
+        <div class="tc-form">
+          <label class="tc-row"><span>Table type</span>
+            <select id="tcType">
+              <option value="wired">Wired (ruled)</option>
+              <option value="wireless">Wireless (unruled)</option>
+            </select>
+          </label>
+          <label class="tc-row"><span>Cell threshold</span>
+            <input id="tcCellThr" type="number" min="0" max="1" step="0.05" value="0.3">
+          </label>
+          <label class="tc-row"><span>Assign class</span>
+            <select id="tcClass"></select>
+          </label>
+          <label class="tc-chk"><input type="checkbox" id="tcUseLayout"> Find tables first (layout model)</label>
+          <label class="tc-row" id="tcLayoutThrRow" hidden><span>Layout threshold</span>
+            <input id="tcLayoutThr" type="number" min="0" max="1" step="0.05" value="0.3">
+          </label>
+          <label class="tc-chk"><input type="checkbox" id="tcReplace"> Replace this class&rsquo;s boxes on the image</label>
+          <div class="tc-buttons">
+            <button id="btnDetectCells" class="btn primary small2" disabled title="Detect table cells on the current image">Detect (this image)</button>
+            <button id="btnDetectAll" class="btn small2" disabled title="Detect table cells on every image in the project">All images</button>
+          </div>
+          <details id="tcModelsDetails">
+            <summary>Model files</summary>
+            <div id="tcModels"></div>
+            <div class="tc-note">ONNX models are downloaded once in your browser (or loaded from disk) and kept in browser storage. Inference runs locally; nothing is uploaded.</div>
+          </details>
+        </div>
+      </section>
       <section class="panel-block">
         <h3>Help</h3>
         <div id="helpText" class="help"></div>
@@ -124,10 +159,12 @@
     <div class="spinner"></div>
     <div id="loadingText">Loading&hellip;</div>
     <div id="loadingSub" class="loading-sub"></div>
+    <button id="btnCancelBusy" class="btn small2" hidden style="margin-top:12px">Cancel</button>
   </div>
 </div>
 
 <script src="vendor/jszip.min.js"></script>
+<script src="table-cells.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
