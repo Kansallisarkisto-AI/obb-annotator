@@ -325,7 +325,7 @@ function ensureOrt(onStatus) {
     ort.env.wasm.wasmBinary = b64ToBytes(E.wasmB64);
     E.wasmB64 = null; // free the base64 copy
     // single-threaded: multi-threading needs cross-origin isolation, which file:// pages don't have
-    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.numThreads = 4;
     ort.env.wasm.proxy = false;
     ortLib = ort;
     return ort;
