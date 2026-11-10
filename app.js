@@ -77,6 +77,7 @@ var state = {
   future: [],
 
   shadeOverlaps: true,  // darken areas where boxes overlap
+  colorByLabels: false, // tint boxes with their label colors (diagonal stripes when multi-labeled)
 
   loaded: false,
   dirty: false
@@ -845,6 +846,7 @@ function drawOverlay() {
   var byColor = new Map(); // colorHex -> array of box
   var visibleCount = 0, culledCount = 0, hiddenCount = 0;
   var visList = [];
+  var byCombo = new Map(); // label-combo key -> { cids, boxes } (only when colorByLabels)
 
   for (var i = 0; i < boxes.length; i++) {
     var box = boxes[i];
@@ -863,6 +865,14 @@ function drawOverlay() {
     var color = cls ? classColorCache(primaryCid) : "#888";
     var arr = byColor.get(color);
     if (!arr) { arr = []; byColor.set(color, arr); }
+    if (state.colorByLabels) {
+      var vl = visibleLabelCids(box);
+      var ckey = vl.join(",");
+      var carr = byCombo.get(ckey);
+      if (!carr) { carr = { cids: vl, boxes: [] }; byCombo.set(ckey, carr); }
+      carr.boxes.push(box);
+      if (vl.length > 1) continue; // striped outline is drawn in its own pass
+    }
     arr.push(box);
   }
 
@@ -880,6 +890,36 @@ function drawOverlay() {
         ctx.fill();
       });
     }
+  }
+
+  // label-color mode: translucent tint per label combination (diagonal stripes when multi-labeled)
+  if (state.colorByLabels) {
+    byCombo.forEach(function (g) {
+      if (!g.cids.length) return;
+      var fillStyle = g.cids.length === 1 ? classColorCache(g.cids[0]) : labelStripePattern(ctx, g.cids, dpr);
+      if (!fillStyle) return;
+      ctx.beginPath();
+      for (var q = 0; q < g.boxes.length; q++) addBoxPath(ctx, g.boxes[q], im, v);
+      ctx.globalAlpha = g.cids.length === 1 ? 0.22 : 0.38;
+      ctx.fillStyle = fillStyle;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      if (g.cids.length > 1) {
+        // striped outline for non-selected multi-label boxes
+        ctx.beginPath();
+        var any = false;
+        for (var q2 = 0; q2 < g.boxes.length; q2++) {
+          if (sel.has(g.boxes[q2].id)) continue;
+          addBoxPath(ctx, g.boxes[q2], im, v);
+          any = true;
+        }
+        if (any) {
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = fillStyle;
+          ctx.stroke();
+        }
+      }
+    });
   }
 
   // draw non-selected boxes, batched by color
@@ -974,7 +1014,49 @@ function classColorCache(cid) {
   _colorCache.set(cid, c);
   return c;
 }
-function invalidateColorCache() { _colorCache.clear(); }
+function invalidateColorCache() { _colorCache.clear(); _stripeCache.clear(); }
+
+/* Label cids of a box whose class is currently visible (and still exists). */
+function visibleLabelCids(box) {
+  var out = [];
+  for (var i = 0; i < box.labels.length; i++) {
+    var cid = box.labels[i];
+    if (state.classVisible[cid] === false) continue;
+    if (!classByCid(cid)) continue;
+    out.push(cid);
+  }
+  return out;
+}
+
+/* Diagonal-stripe pattern cycling through the given classes' colors. Cached per combo + dpr. */
+var _stripeCache = new Map();
+var STRIPE_W = 5; // css px per color band
+function labelStripePattern(ctx, cids, dpr) {
+  var key = cids.join(",") + "@" + dpr;
+  var p = _stripeCache.get(key);
+  if (p) return p;
+  var n = cids.length;
+  var w = STRIPE_W * dpr;
+  var T = Math.round(w * n);
+  var tile = document.createElement("canvas");
+  tile.width = tile.height = T;
+  var t = tile.getContext("2d");
+  for (var j = 0; j < n; j++) {
+    t.fillStyle = classColorCache(cids[j]);
+    for (var m = 0; m < 3; m++) {
+      var c = j * w + m * T;
+      t.beginPath();
+      t.moveTo(c, 0); t.lineTo(c + w, 0); t.lineTo(c + w - T, T); t.lineTo(c - T, T);
+      t.closePath();
+      t.fill();
+    }
+  }
+  p = ctx.createPattern(tile, "repeat");
+  if (p && p.setTransform && typeof DOMMatrix !== "undefined") p.setTransform(new DOMMatrix().scale(1 / dpr));
+  _stripeCache.set(key, p);
+  return p;
+}
+
 
 function addBoxPath(ctx, box, im, v) {
   var p = box.pts;
@@ -1591,6 +1673,12 @@ function onKeyDown(evt) {
   var tag = (document.activeElement && document.activeElement.tagName) || "";
   var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.activeElement.isContentEditable;
 
+  if (isHelpOpen()) {
+    if (evt.key === "Escape" || evt.key === "F1" || evt.key === "?") { evt.preventDefault(); setHelpOpen(false); }
+    return; // swallow everything else while the help modal is open
+  }
+  if (evt.key === "F1" || (!typing && evt.key === "?")) { evt.preventDefault(); setHelpOpen(true); return; }
+
   if (evt.code === "Space" && !typing) {
     spaceHeld = true;
     dom.viewport.classList.add("space-pan");
@@ -1620,6 +1708,7 @@ function onKeyDown(evt) {
   if (evt.key === "b" || evt.key === "B") { setTool("draw"); return; }
   if (evt.key === "f" || evt.key === "F") { fitToWindow(); return; }
   if (evt.key === "o" || evt.key === "O") { setOverlapShading(!state.shadeOverlaps); return; }
+  if (!evt.ctrlKey && !evt.metaKey && !evt.altKey && (evt.key === "l" || evt.key === "L")) { setColorByLabels(!state.colorByLabels); return; }
   if (evt.key === "+" || evt.key === "=") { zoomBy(1.2); return; }
   if (evt.key === "-" || evt.key === "_") { zoomBy(1 / 1.2); return; }
 
@@ -1648,6 +1737,12 @@ function zoomBy(factor) {
 function setOverlapShading(on) {
   state.shadeOverlaps = !!on;
   if (dom.btnOverlap) dom.btnOverlap.classList.toggle("active", state.shadeOverlaps);
+  requestRedraw();
+}
+
+function setColorByLabels(on) {
+  state.colorByLabels = !!on;
+  if (dom.btnLabelColors) dom.btnLabelColors.classList.toggle("active", state.colorByLabels);
   requestRedraw();
 }
 
@@ -2529,6 +2624,10 @@ function wireEvents() {
   dom.btnZoomOut.addEventListener("click", function () { zoomBy(1 / 1.25); });
   dom.btnZoomFit.addEventListener("click", fitToWindow);
   dom.btnOverlap.addEventListener("click", function () { setOverlapShading(!state.shadeOverlaps); });
+  dom.btnHelp.addEventListener("click", function () { setHelpOpen(true); });
+  dom.btnCloseHelp.addEventListener("click", function () { setHelpOpen(false); });
+  dom.helpModal.addEventListener("mousedown", function (e) { if (e.target === dom.helpModal) setHelpOpen(false); });
+  dom.btnLabelColors.addEventListener("click", function () { setColorByLabels(!state.colorByLabels); });
 
   dom.btnAddClass.addEventListener("click", addClass);
 
@@ -2572,19 +2671,52 @@ function wireEvents() {
 }
 
 function initHelp() {
+  var K = function (t) { return "<kbd>" + t + "</kbd>"; };
+  var rows = function (list) {
+    return list.map(function (r) {
+      return '<div class="help-row"><div class="keys">' + r[0] + '</div><div class="desc">' + r[1] + "</div></div>";
+    }).join("");
+  };
   dom.helpText.innerHTML =
-    "<kbd>V</kbd> select &nbsp; <kbd>B</kbd> new box<br>" +
-    "<kbd>Shift</kbd>/<kbd>Ctrl</kbd>+click/drag adds to selection (never moves)<br>" +
-    "Drag empty area to rubber-band select<br>" +
-    "Drag box body to move &middot; corners to resize<br>" +
-    "Edge bars move one edge &middot; green handle rotates &middot; <kbd>Alt</kbd>+corner = free vertex<br>" +
-    "Click the same spot again to cycle through stacked boxes &middot; <kbd>O</kbd> overlap shading<br>" +
-    "<kbd>Del</kbd> delete &middot; <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate<br>" +
-    "<kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> undo/redo<br>" +
-    "Arrow keys nudge &middot; <kbd>Shift</kbd>+arrow = 10px<br>" +
-    "Scroll to zoom &middot; Space/middle-drag to pan &middot; <kbd>F</kbd> fit<br>" +
-    "<kbd>Ctrl</kbd>+<kbd>S</kbd> save zip";
+    "<h4>Tools</h4>" + rows([
+      [K("V") + " / " + K("B"), "Select tool / draw a new box"],
+      [K("F"), "Fit image to window"],
+      [K("O"), "Toggle overlap shading"],
+      [K("L"), "Toggle label colors (stripes for multi-label boxes)"],
+      [K("?") + " / " + K("F1"), "Show / hide this help"]
+    ]) +
+    "<h4>Selecting</h4>" + rows([
+      ["Click", "Select a box; click the same spot again to cycle through stacked boxes"],
+      [K("Shift") + "/" + K("Ctrl") + " + click", "Toggle a box in the selection (never moves anything)"],
+      ["Drag empty area", "Rubber-band select"],
+      [K("Shift") + "/" + K("Ctrl") + " + drag", "Rubber-band add to selection, even over boxes"],
+      [K("Ctrl") + "+" + K("A"), "Select all visible boxes"],
+      [K("Esc"), "Clear selection"]
+    ]) +
+    "<h4>Editing</h4>" + rows([
+      ["Drag box body", "Move (whole selection moves together)"],
+      ["Drag corner", "Resize, keeping the box rectangular"],
+      [K("Alt") + " + drag corner", "Move a single vertex freely"],
+      ["Drag edge bar", "Move one edge along its normal"],
+      ["Green handle", "Rotate around the centroid"],
+      ["Arrow keys", "Nudge 1px (" + K("Shift") + " = 10px)"],
+      [K("Ctrl") + "+" + K("D"), "Duplicate selection"],
+      [K("Del"), "Delete selection"],
+      [K("Ctrl") + "+" + K("Z") + " / " + K("Ctrl") + "+" + K("Shift") + "+" + K("Z"), "Undo / redo"]
+    ]) +
+    "<h4>View &amp; file</h4>" + rows([
+      ["Scroll", "Zoom around the cursor (" + K("+") + " / " + K("-") + " also work)"],
+      [K("Space") + " + drag, middle/right drag", "Pan"],
+      [K("Ctrl") + "+" + K("S"), "Save zip"]
+    ]);
 }
+
+function setHelpOpen(open) {
+  dom.helpModal.hidden = !open;
+  if (open) dom.btnCloseHelp.focus();
+  else if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+}
+function isHelpOpen() { return dom.helpModal && !dom.helpModal.hidden; }
 
 document.addEventListener("DOMContentLoaded", function () {
   dom = {
@@ -2599,12 +2731,12 @@ document.addEventListener("DOMContentLoaded", function () {
     btnUndo: $("#btnUndo"), btnRedo: $("#btnRedo"),
     btnDuplicate: $("#btnDuplicate"), btnDelete: $("#btnDelete"),
     btnZoomIn: $("#btnZoomIn"), btnZoomOut: $("#btnZoomOut"), btnZoomFit: $("#btnZoomFit"),
-    zoomLabel: $("#zoomLabel"), statusText: $("#statusText"), btnOverlap: $("#btnOverlap"),
+    zoomLabel: $("#zoomLabel"), statusText: $("#statusText"), btnOverlap: $("#btnOverlap"), btnLabelColors: $("#btnLabelColors"),
     imageList: $("#imageList"), imgCount: $("#imgCount"),
     classList: $("#classList"), classCount: $("#classCount"), btnAddClass: $("#btnAddClass"),
     viewport: $("#viewport"), stage: $("#stage"), mainImage: $("#mainImage"), overlayCanvas: $("#overlayCanvas"),
     selCount: $("#selCount"), selDetails: $("#selDetails"), labelChecklist: $("#labelChecklist"),
-    helpText: $("#helpText"),
+    helpText: $("#helpText"), helpModal: $("#helpModal"), btnHelp: $("#btnHelp"), btnCloseHelp: $("#btnCloseHelp"),
     tcBlock: $("#tcBlock"), tcType: $("#tcType"), tcCellThr: $("#tcCellThr"), tcClass: $("#tcClass"),
     tcUseLayout: $("#tcUseLayout"), tcLayoutThr: $("#tcLayoutThr"), tcLayoutThrRow: $("#tcLayoutThrRow"),
     tcReplace: $("#tcReplace"), btnDetectCells: $("#btnDetectCells"), btnDetectAll: $("#btnDetectAll"),

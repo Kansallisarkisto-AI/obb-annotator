@@ -79,6 +79,15 @@ internal id exactly once on load and back again on save.
   bar reports how many visible boxes overlap. Toggle with the
   **◐ Overlaps** toolbar button or `O`. Works for rotated boxes too
   (exact convex-quad test).
+- **Label colors** — the **▨ Label colors** toolbar button (or `L`)
+  tints every box with its label color(s): single-label boxes get a
+  translucent fill, and multi-label boxes get diagonal stripes cycling
+  through each of their (visible) labels' colors, with a striped
+  outline too. Off by default; combines with overlap shading.
+- **Help dialog** — the **? Help** toolbar button (or `?` / `F1`) opens a
+  scrollable, grouped shortcut reference in a modal, so it never gets
+  cut off or competes with the side panels for space. `Esc` or a click
+  outside closes it.
 - **Click-cycling through stacked boxes** — click the same spot again
   (within a few pixels) to step through every box under it, topmost
   first, wrapping around; the status bar shows the position ("overlap
@@ -199,6 +208,8 @@ Notes:
 | Space+drag, middle/right-drag | Pan |
 | `F` | Fit image to window |
 | `O` | Toggle overlap shading |
+| `L` | Toggle label-color tint / stripes |
+| `?` / `F1` | Open / close the help dialog |
 | Click same spot repeatedly | Cycle through stacked boxes |
 | `Ctrl+S` | Save zip |
 

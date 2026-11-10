@@ -43,8 +43,10 @@
     <div class="sep"></div>
 
     <button id="btnOverlap" class="btn tool active" title="Shade overlapping boxes darker (O)">&#9680; Overlaps</button>
+    <button id="btnLabelColors" class="btn tool" title="Tint boxes with their label colors; multi-label boxes get diagonal stripes (L)">&#9638; Label colors</button>
 
     <div class="grow"></div>
+    <button id="btnHelp" class="btn icon" title="Help &amp; keyboard shortcuts (? or F1)">? Help</button>
     <span id="autosaveStatus" class="status" title="Automatic backup to this browser's local storage"></span>
     <button id="btnClearAutosave" class="btn icon" title="Clear the autosaved browser backup">Clear Backup</button>
     <span id="statusText" class="status"></span>
@@ -144,12 +146,18 @@
           </details>
         </div>
       </section>
-      <section class="panel-block">
-        <h3>Help</h3>
-        <div id="helpText" class="help"></div>
-      </section>
     </aside>
 
+  </div>
+</div>
+
+<div id="helpModal" hidden>
+  <div class="help-box" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <div class="help-head">
+      <h2 id="helpTitle">Help &amp; shortcuts</h2>
+      <button id="btnCloseHelp" class="btn icon" title="Close (Esc)">&times;</button>
+    </div>
+    <div id="helpText" class="help"></div>
   </div>
 </div>
 
